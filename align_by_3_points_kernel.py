@@ -143,34 +143,68 @@ def rotation_matrix_to_axis_angle(R):
 # ============================================================
 # 从拾取对象中提取坐标
 # ============================================================
+def _flatten_coord(val):
+    """
+    从可能嵌套的 tuple/list 中安全提取 (x, y, z)。
+    处理 (x,y,z)、((x,y,z),)、(((x,y,z),),) 等嵌套情况。
+    """
+    # 尝试直接作为三个数
+    try:
+        if hasattr(val, '__len__') and len(val) == 3:
+            return (float(val[0]), float(val[1]), float(val[2]))
+    except (TypeError, ValueError):
+        pass
+
+    # 嵌套结构：取第一个元素递归
+    try:
+        if hasattr(val, '__len__') and len(val) > 0:
+            return _flatten_coord(val[0])
+    except (TypeError, ValueError):
+        pass
+
+    raise ValueError("Cannot flatten coordinate from %r" % (val,))
+
+
 def extract_coord(picked_obj):
     """
     从 AFXPickStep 选中的对象中提取 (x, y, z) 坐标。
-    支持 Vertex、DatumPoint、Node 等。
+    支持 Vertex、DatumPoint、Node 等，兼容嵌套元组。
     """
     if picked_obj is None:
         return None
 
-    # sequenceStyle=TUPLE + numberToPick=ONE 可能返回元组或单个对象
+    # AFXObjectKeyword + sequenceStyle=TUPLE 可能包了多层 tuple，
+    # 循环展开单元素 tuple 直到得到实际对象
     obj = picked_obj
-    if hasattr(picked_obj, '__len__'):
+    while True:
+        if not hasattr(obj, '__len__'):
+            break
+        if hasattr(obj, 'pointOn') or hasattr(obj, 'coordinates') \
+                or hasattr(obj, 'instanceName'):
+            break
         try:
-            if len(picked_obj) > 0:
-                obj = picked_obj[0]
+            if len(obj) == 1:
+                obj = obj[0]
+            else:
+                break
         except TypeError:
-            pass
+            break
 
     # DatumPoint / ReferencePoint: .pointOn
     if hasattr(obj, 'pointOn'):
-        p = obj.pointOn
-        return (float(p[0]), float(p[1]), float(p[2]))
+        try:
+            return _flatten_coord(obj.pointOn)
+        except Exception:
+            pass
 
     # Node: .coordinates
     if hasattr(obj, 'coordinates'):
-        p = obj.coordinates
-        return (float(p[0]), float(p[1]), float(p[2]))
+        try:
+            return _flatten_coord(obj.coordinates)
+        except Exception:
+            pass
 
-    # Vertex geometry: 通过 instanceName + index 访问
+    # Vertex geometry: 通过 instanceName + index 访问实际 vertex
     if hasattr(obj, 'instanceName') and hasattr(obj, 'index'):
         try:
             vpName = session.currentViewportName
@@ -178,14 +212,13 @@ def extract_coord(picked_obj):
             ass = mdb.models[modelName].rootAssembly
             vert = ass.instances[obj.instanceName].vertices[obj.index]
             if hasattr(vert, 'pointOn'):
-                p = vert.pointOn
-                return (float(p[0]), float(p[1]), float(p[2]))
+                return _flatten_coord(vert.pointOn)
         except Exception:
             pass
 
-    # 直接可索引
+    # 直接可索引（对象本身就是坐标序列）
     try:
-        return (float(obj[0]), float(obj[1]), float(obj[2]))
+        return _flatten_coord(obj)
     except Exception:
         pass
 
