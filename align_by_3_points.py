@@ -128,30 +128,39 @@ def _v_normalize(a):
 
 
 def _mat_mul(A, B):
-    """3x3 矩阵乘法 A · B"""
-    return tuple(
-        tuple(
-            sum(A[i][k] * B[k][j] for k in range(3))
-            for j in range(3)
-        )
-        for i in range(3)
-    )
+    """3x3 矩阵乘法 A · B（显式循环，兼容 Abaqus Python 2.7）"""
+    result = []
+    for i in range(3):
+        row = []
+        for j in range(3):
+            s = 0.0
+            for k in range(3):
+                s = s + A[i][k] * B[k][j]
+            row.append(s)
+        result.append(tuple(row))
+    return tuple(result)
 
 
 def _mat_transpose(A):
-    """3x3 矩阵转置"""
-    return tuple(
-        tuple(A[j][i] for j in range(3))
-        for i in range(3)
-    )
+    """3x3 矩阵转置（显式循环）"""
+    result = []
+    for i in range(3):
+        row = []
+        for j in range(3):
+            row.append(A[j][i])
+        result.append(tuple(row))
+    return tuple(result)
 
 
 def _mat_vec_mul(A, v):
-    """3x3 矩阵乘向量 A · v"""
-    return tuple(
-        sum(A[i][k] * v[k] for k in range(3))
-        for i in range(3)
-    )
+    """3x3 矩阵乘向量 A · v（显式循环）"""
+    result = []
+    for i in range(3):
+        s = 0.0
+        for k in range(3):
+            s = s + A[i][k] * v[k]
+        result.append(s)
+    return tuple(result)
 
 
 def _mat_trace(A):
@@ -225,8 +234,11 @@ def rotation_matrix_to_axis_angle(R):
         angle_deg: 旋转角度（度）
     """
     cos_angle = (_mat_trace(R) - 1.0) / 2.0
-    # 数值裁剪
-    cos_angle = max(-1.0, min(1.0, cos_angle))
+    # 数值裁剪（手动比较，避免 abaqusConstants 覆盖内置 max/min）
+    if cos_angle > 1.0:
+        cos_angle = 1.0
+    elif cos_angle < -1.0:
+        cos_angle = -1.0
     angle = math.acos(cos_angle)
 
     if abs(angle) < 1e-10:
@@ -242,7 +254,11 @@ def rotation_matrix_to_axis_angle(R):
         )
         # 找最大对角元所在行作为轴
         diag = (M[0][0], M[1][1], M[2][2])
-        idx = diag.index(max(diag))
+        idx = 0
+        if diag[1] > diag[idx]:
+            idx = 1
+        if diag[2] > diag[idx]:
+            idx = 2
         axis = _v_normalize((M[idx][0], M[idx][1], M[idx][2]))
         return axis, 180.0
 
@@ -269,7 +285,10 @@ def resolve_point(point_spec, assembly):
     if isinstance(point_spec, (tuple, list)):
         if len(point_spec) != 3:
             raise ValueError("坐标点必须是 (x, y, z) 三元组")
-        return tuple(float(v) for v in point_spec)
+        result = []
+        for v in point_spec:
+            result.append(float(v))
+        return tuple(result)
 
     if isinstance(point_spec, str):
         # 尝试作为 datum point 名称查找
@@ -346,7 +365,8 @@ def align_instance(model_name, moving_instance, source_points,
     for i, s in enumerate(src):
         transformed = _v_add(_mat_vec_mul(R, s), t)
         err = _v_norm(_v_sub(transformed, tgt[i]))
-        max_err = max(max_err, err)
+        if err > max_err:
+            max_err = err
         print("  点 %d: 变换后 (%.6f, %.6f, %.6f), 误差 = %.2e"
               % (i + 1, transformed[0], transformed[1], transformed[2], err))
     print("最大误差: %.2e" % max_err)
