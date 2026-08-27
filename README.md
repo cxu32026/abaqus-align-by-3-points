@@ -28,10 +28,37 @@ y_s = z_s × x_s
 - 平移向量 `t = T1 - R · S1`
 - 变换公式 `p' = R · p + t`
 
-## 使用方法
+## 文件说明
+
+| 文件 | 用途 |
+|------|------|
+| `align_by_3_points.py` | 脚本版：修改 CONFIG 后通过 File → Run Script 运行 |
+| `align_by_3_points_plugin.py` | **GUI 插件版**：安装到 abaqus_plugins 目录，可视化拾取点对齐 |
+
+## GUI 插件版使用（推荐）
+
+### 安装
+1. 将 `align_by_3_points_plugin.py` 复制到 Abaqus 插件目录：
+   - Windows: `C:\Users\<用户名>\abaqus_plugins\`
+   - Linux: `~/abaqus_plugins/`
+2. 重启 Abaqus/CAE
+3. 菜单：**Plug-ins → Align by 3 Points**
+
+### 操作流程
+1. 下拉选择 **Model** 和要移动的 **Moving Instance**
+2. 依次点击 **Pick Source 1/2/3**，对话框自动隐藏，在视口中拾取移动件上的三个点，按 Enter/Done 确认
+3. 依次点击 **Pick Target 1/2/3**，在视口中拾取固定件上的三个对应点
+4. （可选）勾选 **Dry run** 先验证计算结果
+5. 点击 **Apply / OK** 执行对齐
+
+### 支持拾取的点类型
+- 几何顶点 (Vertex)
+- 基准点 (Datum Point)
+- 网格节点 (Node)
+
+## 脚本版使用方法
 
 ### 方式一：修改 CONFIG 后直接运行
-
 1. 在 Abaqus/CAE 中打开模型，进入 **Assembly** 模块；
 2. 用文本编辑器打开 `align_by_3_points.py`，修改 `CONFIG` 字典：
 
