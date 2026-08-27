@@ -2,12 +2,15 @@
 """
 align_by_3_points_kernel.py
 ===========================
-三点对齐装配的核心算法（Abaqus kernel 端）。
-包含：向量/矩阵运算、刚体变换计算、交互式选点、执行对齐。
+三点对齐装配的 kernel 端逻辑。
+由 GUI 端通过 AFXGuiCommand 调用 align_by_3_points_function()。
 """
 
-from abaqus import mdb, session
+from __future__ import print_function
+from abaqus import *
+from abaqusConstants import *
 import math
+
 
 # ============================================================
 # 向量 / 矩阵工具（纯 Python，兼容 Abaqus Python 2.7）
@@ -78,7 +81,6 @@ def _mat_trace(A):
 # 核心算法
 # ============================================================
 def build_local_frame(p1, p2, p3):
-    """由三个不共线的点构建右手正交坐标系"""
     x_axis = _v_normalize(_v_sub(p2, p1))
     temp = _v_sub(p3, p1)
     z_axis = _v_normalize(_v_cross(x_axis, temp))
@@ -87,7 +89,6 @@ def build_local_frame(p1, p2, p3):
 
 
 def compute_rigid_transform(source_points, target_points):
-    """计算从源三点到目标三点的刚体变换 (R, t)"""
     s_orig, s_x, s_y, s_z = build_local_frame(*source_points)
     t_orig, t_x, t_y, t_z = build_local_frame(*target_points)
 
@@ -107,7 +108,6 @@ def compute_rigid_transform(source_points, target_points):
 
 
 def rotation_matrix_to_axis_angle(R):
-    """旋转矩阵 -> 轴角表示"""
     cos_angle = (_mat_trace(R) - 1.0) / 2.0
     if cos_angle > 1.0:
         cos_angle = 1.0
@@ -141,77 +141,123 @@ def rotation_matrix_to_axis_angle(R):
 
 
 # ============================================================
-# 交互式选点
+# 从拾取对象中提取坐标
 # ============================================================
-def extract_coordinates(obj):
-    """从选中对象中提取 (x, y, z)"""
+def extract_coord(picked_obj):
+    """
+    从 AFXPickStep 选中的对象中提取 (x, y, z) 坐标。
+    支持 Vertex、DatumPoint、Node 等。
+    """
+    if picked_obj is None:
+        return None
+
+    # sequenceStyle=TUPLE + numberToPick=ONE 可能返回元组或单个对象
+    obj = picked_obj
+    if hasattr(picked_obj, '__len__'):
+        try:
+            if len(picked_obj) > 0:
+                obj = picked_obj[0]
+        except TypeError:
+            pass
+
+    # DatumPoint / ReferencePoint: .pointOn
     if hasattr(obj, 'pointOn'):
         p = obj.pointOn
         return (float(p[0]), float(p[1]), float(p[2]))
+
+    # Node: .coordinates
     if hasattr(obj, 'coordinates'):
         p = obj.coordinates
         return (float(p[0]), float(p[1]), float(p[2]))
-    if hasattr(obj, 'getVertices'):
-        verts = obj.getVertices()
-        if verts and len(verts) > 0:
-            p = verts[0]
-            return (float(p[0]), float(p[1]), float(p[2]))
+
+    # Vertex geometry: 通过 instanceName + index 访问
+    if hasattr(obj, 'instanceName') and hasattr(obj, 'index'):
+        try:
+            vpName = session.currentViewportName
+            modelName = session.sessionState[vpName]['modelName']
+            ass = mdb.models[modelName].rootAssembly
+            vert = ass.instances[obj.instanceName].vertices[obj.index]
+            if hasattr(vert, 'pointOn'):
+                p = vert.pointOn
+                return (float(p[0]), float(p[1]), float(p[2]))
+        except Exception:
+            pass
+
+    # 直接可索引
     try:
         return (float(obj[0]), float(obj[1]), float(obj[2]))
     except Exception:
         pass
+
     raise ValueError("Cannot extract coordinates from %s" % type(obj))
 
 
-def pick_point_interactive(prompt_text):
+# ============================================================
+# 主函数（由 GUI 端 AFXGuiCommand 调用）
+# ============================================================
+def align_by_3_points_function(
+    kw_moving_instance=None,
+    kw_src1=None, kw_src2=None, kw_src3=None,
+    kw_tgt1=None, kw_tgt2=None, kw_tgt3=None,
+    kw_dry_run=None,
+):
     """
-    交互式在视口中拾取一个点。
-    返回 (x,y,z) 或 None。
+    GUI 调用入口。参数名必须与 plugin 文件中 AFXKeyword 的名称一致。
     """
-    print(prompt_text)
+    # ---- 校验 ----
+    if kw_moving_instance is None or kw_moving_instance == '':
+        getWarningReply(
+            message='Please select a moving instance first!',
+            buttons=(CANCEL,))
+        return
+
+    src_picked = [kw_src1, kw_src2, kw_src3]
+    tgt_picked = [kw_tgt1, kw_tgt2, kw_tgt3]
+
+    for i, p in enumerate(src_picked):
+        if p is None:
+            getWarningReply(
+                message='Please pick all 3 source points (missing Src %d)!' % (i + 1),
+                buttons=(CANCEL,))
+            return
+    for i, p in enumerate(tgt_picked):
+        if p is None:
+            getWarningReply(
+                message='Please pick all 3 target points (missing Tgt %d)!' % (i + 1),
+                buttons=(CANCEL,))
+            return
+
+    # ---- 提取坐标 ----
     try:
-        from abaqus import getNext
-        objects = getNext()
-        if objects is not None:
-            if hasattr(objects, '__len__') and len(objects) > 0:
-                obj = objects[0]
-            else:
-                obj = objects
-            return extract_coordinates(obj)
+        src_points = [extract_coord(p) for p in src_picked]
+        tgt_points = [extract_coord(p) for p in tgt_picked]
     except Exception as e:
-        print("Pick error: %s" % str(e))
-    return None
+        getWarningReply(message='Failed to extract coordinates:\n%s' % str(e),
+                        buttons=(CANCEL,))
+        return
 
+    for p in src_points + tgt_points:
+        if p is None:
+            getWarningReply(message='Failed to extract coordinates from a picked point.',
+                            buttons=(CANCEL,))
+            return
 
-# ============================================================
-# 主对齐函数
-# ============================================================
-def align_instance(model_name, moving_instance, source_points,
-                   target_points, dry_run=False):
-    """执行三点对齐，返回变换参数字典"""
-    if len(source_points) != 3 or len(target_points) != 3:
-        raise ValueError("Must provide exactly 3 source and 3 target points")
-    if model_name not in mdb.models.keys():
-        raise ValueError("Model '%s' not found" % model_name)
+    # ---- 获取当前模型 ----
+    vpName = session.currentViewportName
+    modelName = session.sessionState[vpName]['modelName']
 
-    model = mdb.models[model_name]
-    assembly = model.rootAssembly
-
-    if moving_instance not in assembly.instances.keys():
-        raise ValueError("Instance '%s' not found" % moving_instance)
-
-    src = [tuple(float(v) for v in p) for p in source_points]
-    tgt = [tuple(float(v) for v in p) for p in target_points]
-
+    # ---- 打印信息 ----
     print("=" * 60)
     print("Abaqus 3-Point Alignment")
     print("=" * 60)
-    print("Moving instance: %s" % moving_instance)
-    for i, (s, tt) in enumerate(zip(src, tgt)):
+    print("Model: %s" % modelName)
+    print("Moving instance: %s" % kw_moving_instance)
+    for i, (s, tt) in enumerate(zip(src_points, tgt_points)):
         print("  Pt %d: src (%.4f, %.4f, %.4f) -> tgt (%.4f, %.4f, %.4f)"
               % (i + 1, s[0], s[1], s[2], tt[0], tt[1], tt[2]))
 
-    R, t = compute_rigid_transform(src, tgt)
+    # ---- 计算变换 ----
+    R, t = compute_rigid_transform(src_points, tgt_points)
     axis, angle_deg = rotation_matrix_to_axis_angle(R)
 
     print("\n--- Result ---")
@@ -222,25 +268,36 @@ def align_instance(model_name, moving_instance, source_points,
     print("Axis:          (%.6f, %.6f, %.6f)" % axis)
     print("Angle:         %.4f deg" % angle_deg)
 
+    # ---- 精度验证 ----
     print("\n--- Accuracy check ---")
     max_err = 0.0
-    for i, s in enumerate(src):
+    for i, s in enumerate(src_points):
         transformed = _v_add(_mat_vec_mul(R, s), t)
-        err = _v_norm(_v_sub(transformed, tgt[i]))
+        err = _v_norm(_v_sub(transformed, tgt_points[i]))
         if err > max_err:
             max_err = err
         print("  Pt %d: transformed (%.6f, %.6f, %.6f), error = %.2e"
               % (i + 1, transformed[0], transformed[1], transformed[2], err))
     print("Max error: %.2e" % max_err)
 
-    if dry_run:
+    if kw_dry_run:
         print("\n[dry_run] No transform applied.")
-        return {'R': R, 't': t, 'axis': axis, 'angle_deg': angle_deg}
+        print("=" * 60)
+        return
+
+    # ---- 执行变换 ----
+    ass = mdb.models[modelName].rootAssembly
+
+    if kw_moving_instance not in ass.instances.keys():
+        getWarningReply(
+            message="Instance '%s' not found in assembly!" % kw_moving_instance,
+            buttons=(CANCEL,))
+        return
 
     print("\n--- Applying transform ---")
     if abs(angle_deg) > 1e-6:
-        assembly.rotate(
-            instanceList=(moving_instance,),
+        ass.rotate(
+            instanceList=(kw_moving_instance,),
             axisPoint=(0.0, 0.0, 0.0),
             axisDirection=axis,
             angle=angle_deg,
@@ -250,8 +307,8 @@ def align_instance(model_name, moving_instance, source_points,
         print("  Rotation near zero, skipped")
 
     if _v_norm(t) > 1e-9:
-        assembly.translate(
-            instanceList=(moving_instance,),
+        ass.translate(
+            instanceList=(kw_moving_instance,),
             vector=t,
         )
         print("  Translated: vector=%s" % (t,))
@@ -263,26 +320,5 @@ def align_instance(model_name, moving_instance, source_points,
     except Exception:
         pass
 
-    print("\nDone! Instance '%s' aligned." % moving_instance)
+    print("\nDone! Instance '%s' aligned." % kw_moving_instance)
     print("=" * 60)
-    return {'R': R, 't': t, 'axis': axis, 'angle_deg': angle_deg}
-
-
-# ============================================================
-# 辅助：获取模型和实例列表
-# ============================================================
-def get_model_names():
-    """返回当前所有模型名称列表"""
-    try:
-        return list(mdb.models.keys())
-    except Exception:
-        return ['Model-1']
-
-
-def get_instance_names(model_name):
-    """返回指定模型中所有实例名称列表"""
-    try:
-        assembly = mdb.models[model_name].rootAssembly
-        return list(assembly.instances.keys())
-    except Exception:
-        return []

@@ -2,252 +2,148 @@
 """
 align_by_3_pointsDB.py
 ======================
-三点对齐插件的 GUI 对话框（Abaqus AFX 标准组件）。
+三点对齐插件的 GUI 对话框（标准 AFX + FX 组件）。
 """
 
+from abaqusConstants import *
 from abaqusGui import *
-from align_by_3_points_kernel import (
-    align_instance,
-    pick_point_interactive,
-    get_model_names,
-    get_instance_names,
-)
+from kernelAccess import mdb, session
+import os
+
+thisPath = os.path.abspath(__file__)
+thisDir = os.path.dirname(thisPath)
 
 
-class AlignBy3PointsDialog(AFXDataDialog):
-    """三点对齐主对话框"""
+###########################################################################
+# 对话框
+###########################################################################
+class AlignBy3PointsDB(AFXDataDialog):
 
-    # ---- 自定义消息 ID ----
-    ID_PICK_SRC_1 = AFXDataDialog.ID_LAST + 1
-    ID_PICK_SRC_2 = AFXDataDialog.ID_LAST + 2
-    ID_PICK_SRC_3 = AFXDataDialog.ID_LAST + 3
-    ID_PICK_TGT_1 = AFXDataDialog.ID_LAST + 4
-    ID_PICK_TGT_2 = AFXDataDialog.ID_LAST + 5
-    ID_PICK_TGT_3 = AFXDataDialog.ID_LAST + 6
-    ID_REFRESH    = AFXDataDialog.ID_LAST + 7
-    ID_RESET      = AFXDataDialog.ID_LAST + 8
+    #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def __init__(self, form):
 
-    def __init__(self, parent):
-        AFXDataDialog.__init__(
-            self, parent,
-            'Align by 3 Points',
-            self.OK | self.CANCEL | self.APPLY,
-            DIALOG_ACTIONS_SEPARATOR,
-        )
+        # Construct the base class.
+        #
+        AFXDataDialog.__init__(self, form, 'Align by 3 Points',
+            self.OK | self.APPLY | self.CANCEL, DIALOG_ACTIONS_SEPARATOR)
 
-        self.source_points = [None, None, None]
-        self.target_points = [None, None, None]
+        okBtn = self.getActionButton(self.ID_CLICKED_OK)
+        okBtn.setText('OK')
 
-        # ==== 主垂直布局 ====
-        main = AFXVerticalFrame(
-            self, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X)
+        applyBtn = self.getActionButton(self.ID_CLICKED_APPLY)
+        applyBtn.setText('Apply')
 
-        # ---- 模型 & 实例选择 ----
-        selFrame = AFXHorizontalFrame(main, LAYOUT_FILL_X)
+        # ---- 获取当前模型的实例列表 ----
+        vpName = session.currentViewportName
+        modelName = session.sessionState[vpName]['modelName']
+        ass = mdb.models[modelName].rootAssembly
+        instance_names = ass.instances.keys()
 
-        AFXLabel(selFrame, 0, 'Model:')
-        self.model_combo = AFXComboBox(selFrame, 15, 10)
-        for name in get_model_names():
-            self.model_combo.appendItem(name)
-        if self.model_combo.getNumItems() > 0:
-            self.model_combo.setCurrentItem(0)
-
-        AFXLabel(selFrame, 0, '   Moving Instance:')
-        self.instance_combo = AFXComboBox(selFrame, 20, 10)
-
-        refresh_btn = AFXButton(selFrame, 'Refresh')
-        refresh_btn.setTarget(self)
-        refresh_btn.setSelector(self.ID_REFRESH)
-
-        # ---- Source Points 分组 ----
-        src_group = AFXGroupBox(main, 'Source Points (on moving instance)')
-        self.src_texts = []
-        src_ids = [self.ID_PICK_SRC_1, self.ID_PICK_SRC_2, self.ID_PICK_SRC_3]
-        for i in range(3):
-            row = AFXHorizontalFrame(src_group, LAYOUT_FILL_X)
-            AFXLabel(row, 0, 'Src %d:' % (i + 1))
-            tf = AFXTextField(row, 30)
-            tf.setText('Not selected')
-            tf.setEditable(FALSE)
-            self.src_texts.append(tf)
-            btn = AFXButton(row, 'Pick Src %d' % (i + 1))
-            btn.setTarget(self)
-            btn.setSelector(src_ids[i])
-
-        # ---- Target Points 分组 ----
-        tgt_group = AFXGroupBox(main, 'Target Points (on fixed instance)')
-        self.tgt_texts = []
-        tgt_ids = [self.ID_PICK_TGT_1, self.ID_PICK_TGT_2, self.ID_PICK_TGT_3]
-        for i in range(3):
-            row = AFXHorizontalFrame(tgt_group, LAYOUT_FILL_X)
-            AFXLabel(row, 0, 'Tgt %d:' % (i + 1))
-            tf = AFXTextField(row, 30)
-            tf.setText('Not selected')
-            tf.setEditable(FALSE)
-            self.tgt_texts.append(tf)
-            btn = AFXButton(row, 'Pick Tgt %d' % (i + 1))
-            btn.setTarget(self)
-            btn.setSelector(tgt_ids[i])
-
-        # ---- 选项 ----
-        optFrame = AFXHorizontalFrame(main, LAYOUT_FILL_X)
-        self.dry_run_check = AFXCheckButton(
-            optFrame, 'Dry run (compute only, do not move)')
-        self.dry_run_check.setCheck(FALSE)
-
-        reset_btn = AFXButton(optFrame, 'Reset All')
-        reset_btn.setTarget(self)
-        reset_btn.setSelector(self.ID_RESET)
-
-        # 初始化实例列表
-        self._refresh_instances()
-
-    # ================================================================
-    # 辅助方法
-    # ================================================================
-    def _refresh_instances(self):
-        """根据当前选中的模型刷新实例下拉框"""
-        idx = self.model_combo.getCurrentItem()
-        if idx < 0:
-            return
-        model_name = self.model_combo.getItemText(idx)
-        self.instance_combo.clearItems()
-        for name in get_instance_names(model_name):
-            self.instance_combo.appendItem(name)
-        if self.instance_combo.getNumItems() > 0:
+        # ---- 移动实例选择 ----
+        self.instance_combo = AFXComboBox(
+            p=self, ncols=20, nvis=1, text='Moving Instance: ',
+            tgt=form.kw_moving_instanceKw, sel=0)
+        self.instance_combo.setMaxVisible(10)
+        for name in instance_names:
+            self.instance_combo.appendItem(text=name)
+        if len(instance_names) > 0:
             self.instance_combo.setCurrentItem(0)
 
-    def _do_pick(self, point_type, index):
-        """拾取一个点：隐藏对话框 -> 选点 -> 重新显示"""
-        label = 'Source' if point_type == 'source' else 'Target'
-        prompt = ('>>> Pick %s point %d in viewport, '
-                  'then press Enter / Done' % (label, index + 1))
+        # ---- Source Points 分组 ----
+        GroupBox_src = FXGroupBox(
+            p=self, text='Source Points (on moving instance)',
+            opts=FRAME_GROOVE | LAYOUT_FILL_X)
 
-        self.hide()
-        coord = pick_point_interactive(prompt)
-        self.show()
+        src_kws = [form.kw_src1Kw, form.kw_src2Kw, form.kw_src3Kw]
+        for i in range(3):
+            pickHf = FXHorizontalFrame(
+                p=GroupBox_src, opts=0, x=0, y=0, w=0, h=0,
+                pl=0, pr=0, pt=0, pb=0,
+                hs=DEFAULT_SPACING, vs=DEFAULT_SPACING)
+            pickHf.setSelector(99)
+            label = FXLabel(
+                p=pickHf, text='Src %d: (None)' % (i + 1),
+                ic=None, opts=LAYOUT_CENTER_Y | JUSTIFY_LEFT)
+            pickHandler = AlignBy3PointsDBPickHandler(
+                form, src_kws[i],
+                'Pick source point %d: ' % (i + 1),
+                VERTICES, ONE, label)
+            icon = afxGetIcon('select', AFX_ICON_SMALL)
+            FXButton(
+                p=pickHf, text='\tPick Src %d' % (i + 1), ic=icon,
+                tgt=pickHandler, sel=AFXMode.ID_ACTIVATE,
+                opts=BUTTON_NORMAL | LAYOUT_CENTER_Y,
+                x=0, y=0, w=0, h=0, pl=2, pr=2, pt=1, pb=1)
 
-        if coord is not None:
-            coord_str = '(%.4f, %.4f, %.4f)' % coord
-            if point_type == 'source':
-                self.source_points[index] = coord
-                self.src_texts[index].setText(coord_str)
-            else:
-                self.target_points[index] = coord
-                self.tgt_texts[index].setText(coord_str)
-            print("%s %d = %s" % (label, index + 1, coord_str))
-        else:
-            print("%s %d pick cancelled" % (label, index + 1))
+        # ---- Target Points 分组 ----
+        GroupBox_tgt = FXGroupBox(
+            p=self, text='Target Points (on fixed instance)',
+            opts=FRAME_GROOVE | LAYOUT_FILL_X)
 
-    def _reset_all(self):
-        """清除所有已选点"""
-        self.source_points = [None, None, None]
-        self.target_points = [None, None, None]
-        for tf in self.src_texts:
-            tf.setText('Not selected')
-        for tf in self.tgt_texts:
-            tf.setText('Not selected')
-        print("All points reset")
+        tgt_kws = [form.kw_tgt1Kw, form.kw_tgt2Kw, form.kw_tgt3Kw]
+        for i in range(3):
+            pickHf = FXHorizontalFrame(
+                p=GroupBox_tgt, opts=0, x=0, y=0, w=0, h=0,
+                pl=0, pr=0, pt=0, pb=0,
+                hs=DEFAULT_SPACING, vs=DEFAULT_SPACING)
+            pickHf.setSelector(99)
+            label = FXLabel(
+                p=pickHf, text='Tgt %d: (None)' % (i + 1),
+                ic=None, opts=LAYOUT_CENTER_Y | JUSTIFY_LEFT)
+            pickHandler = AlignBy3PointsDBPickHandler(
+                form, tgt_kws[i],
+                'Pick target point %d: ' % (i + 1),
+                VERTICES, ONE, label)
+            icon = afxGetIcon('select', AFX_ICON_SMALL)
+            FXButton(
+                p=pickHf, text='\tPick Tgt %d' % (i + 1), ic=icon,
+                tgt=pickHandler, sel=AFXMode.ID_ACTIVATE,
+                opts=BUTTON_NORMAL | LAYOUT_CENTER_Y,
+                x=0, y=0, w=0, h=0, pl=2, pr=2, pt=1, pb=1)
 
-    # ================================================================
-    # 按钮回调
-    # ================================================================
-    def onPickSrc1(self, sender, sel, ptr):
-        self._do_pick('source', 0)
-        return 1
+        # ---- Dry run ----
+        FXCheckButton(
+            p=self, text='Dry run (compute only, do not move)',
+            tgt=form.kw_dry_runKw, sel=0)
 
-    def onPickSrc2(self, sender, sel, ptr):
-        self._do_pick('source', 1)
-        return 1
+        # ---- 提示 ----
+        l = FXLabel(
+            p=self,
+            text='Note: Always confirm selection with DONE or middle mouse button.',
+            opts=JUSTIFY_LEFT)
 
-    def onPickSrc3(self, sender, sel, ptr):
-        self._do_pick('source', 2)
-        return 1
 
-    def onPickTgt1(self, sender, sel, ptr):
-        self._do_pick('target', 0)
-        return 1
+###########################################################################
+# Pick Handler
+###########################################################################
+class AlignBy3PointsDBPickHandler(AFXProcedure):
 
-    def onPickTgt2(self, sender, sel, ptr):
-        self._do_pick('target', 1)
-        return 1
+    count = 0
 
-    def onPickTgt3(self, sender, sel, ptr):
-        self._do_pick('target', 2)
-        return 1
+    #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def __init__(self, form, keyword, prompt, entitiesToPick,
+                 numberToPick, label):
+        self.form = form
+        self.keyword = keyword
+        self.prompt = prompt
+        self.entitiesToPick = entitiesToPick
+        self.numberToPick = numberToPick
+        self.label = label
+        self.labelText = label.getText()
+        AFXProcedure.__init__(self, form.getOwner())
+        AlignBy3PointsDBPickHandler.count += 1
+        self.setModeName(
+            'AlignBy3PointsDBPickHandler%d'
+            % (AlignBy3PointsDBPickHandler.count))
 
-    def onRefresh(self, sender, sel, ptr):
-        self._refresh_instances()
-        return 1
+    #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def getFirstStep(self):
+        return AFXPickStep(
+            self, self.keyword, self.prompt,
+            self.entitiesToPick, self.numberToPick,
+            sequenceStyle=TUPLE)
 
-    def onReset(self, sender, sel, ptr):
-        self._reset_all()
-        return 1
-
-    # ================================================================
-    # Apply / OK
-    # ================================================================
-    def onApply(self):
-        """点击 Apply 或 OK 时执行对齐"""
-        # 获取模型名
-        midx = self.model_combo.getCurrentItem()
-        if midx < 0:
-            AFXErrorMessage(self, 'Please select a model.')
-            return 0
-        model_name = self.model_combo.getItemText(midx)
-
-        # 获取实例名
-        iidx = self.instance_combo.getCurrentItem()
-        if iidx < 0:
-            AFXErrorMessage(self, 'Please select a moving instance.')
-            return 0
-        instance_name = self.instance_combo.getItemText(iidx)
-
-        dry_run = (self.dry_run_check.getCheck() == TRUE)
-
-        # 校验点
-        if None in self.source_points:
-            AFXErrorMessage(self, 'Please pick all 3 source points first.')
-            return 0
-        if None in self.target_points:
-            AFXErrorMessage(self, 'Please pick all 3 target points first.')
-            return 0
-
-        try:
-            align_instance(
-                model_name=model_name,
-                moving_instance=instance_name,
-                source_points=self.source_points,
-                target_points=self.target_points,
-                dry_run=dry_run,
-            )
-            if not dry_run:
-                AFXInformationMessage(
-                    self,
-                    'Alignment completed!\nCheck message area for details.',
-                )
-        except Exception as e:
-            AFXErrorMessage(self, 'Alignment failed:\n%s' % str(e))
-            return 0
-
-        return 1
-
-    # ================================================================
-    # 消息映射
-    # ================================================================
-    FXMAPFUNC(SEL_COMMAND, ID_PICK_SRC_1,
-              'AlignBy3PointsDialog.onPickSrc1')
-    FXMAPFUNC(SEL_COMMAND, ID_PICK_SRC_2,
-              'AlignBy3PointsDialog.onPickSrc2')
-    FXMAPFUNC(SEL_COMMAND, ID_PICK_SRC_3,
-              'AlignBy3PointsDialog.onPickSrc3')
-    FXMAPFUNC(SEL_COMMAND, ID_PICK_TGT_1,
-              'AlignBy3PointsDialog.onPickTgt1')
-    FXMAPFUNC(SEL_COMMAND, ID_PICK_TGT_2,
-              'AlignBy3PointsDialog.onPickTgt2')
-    FXMAPFUNC(SEL_COMMAND, ID_PICK_TGT_3,
-              'AlignBy3PointsDialog.onPickTgt3')
-    FXMAPFUNC(SEL_COMMAND, ID_REFRESH,
-              'AlignBy3PointsDialog.onRefresh')
-    FXMAPFUNC(SEL_COMMAND, ID_RESET,
-              'AlignBy3PointsDialog.onReset')
+    #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    def getNextStep(self, previousStep):
+        self.label.setText(self.labelText.replace('None', 'Picked'))
+        return None
